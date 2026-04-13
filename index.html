@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HadirBos V1.2</title>
+<style>
+  :root { --primary: #0d6efd; --bg: #f8f9fa; --text: #212529; }
+    * { box-sizing: border-box; }
+  body { margin: 0; font-family: 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); }
+.container { max-width: 480px; margin: 0 auto; padding: 15px; }
+.card { background: #fff; border-radius: 12px; padding: 16px; margin: 12px 0; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+  button { background: var(--primary); color: #fff; border: none; padding: 12px; border-radius: 8px; width: 100%; font-weight: bold; font-size: 16px; }
+  button:disabled { background: #ccc; }
+  input { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 8px; margin: 8px 0; }
+  #video, #canvas { width: 100%; border-radius: 8px; }
+.hidden { display: none; }
+.tab { display: none; }
+.tab.active { display: block; }
+.nav { display: flex; gap: 8px; margin-bottom: 16px; }
+.nav button { flex: 1; background: #e9ecef; color: #000; }
+.nav button.active { background: var(--primary); color: #fff; }
+.toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #333; color: #fff; padding: 12px 20px; border-radius: 8px; z-index: 999; }
+.warn { background: #ffc107; color: #000; padding: 12px; border-radius: 8px; margin: 12px 0; text-align: center; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h2>HadirBos V1.2</h2>
+  <div id="fileWarn" class="warn hidden">JANGAN BUKA VIA FILE. Jalankan pake <code>python3 -m http.server</code> biar GPS nyala.</div>
+
+  <div class="nav">
+    <button id="navBos" class="active">Bos</button>
+    <button id="navKuli">Kuli</button>
+    <button id="navLaporan">Laporan</button>
+  </div>
+
+  <div id="bos" class="tab active">
+    <div class="card">
+      <h3>Buat QR Proyek</h3>
+      <input id="namaProyek" placeholder="Nama Proyek: Proyek Tol Becakayu">
+      <button id="btnBuatQR">1. Ambil Lokasi & Buat QR</button>
+      <div id="qrWrap" style="margin-top:16px; text-align:center;"></div>
+      <p id="lokasiTxt" style="font-size:12px; opacity:0.7;"></p>
+    </div>
+  </div>
+
+  <div id="kuli" class="tab">
+    <div class="card">
+      <h3>Absen Masuk</h3>
+      <button id="btnStartScan">1. Scan QR Proyek</button>
+      <video id="video" class="hidden" playsinline muted></video>
+      <canvas id="canvas" class="hidden"></canvas>
+      <input id="namaKuli" placeholder="Nama Lu" style="margin-top:12px;">
+      <button id="btnSelfie" class="hidden">2. Selfie + Absen</button>
+      <p id="statusKuli"></p>
+    </div>
+  </div>
+
+  <div id="laporan" class="tab">
+    <div class="card">
+      <h3>Data Hari Ini</h3>
+      <div id="listAbsen">Belum ada data</div>
+      <button id="btnExport">Export CSV</button>
+      <p style="font-size:11px; opacity:0.6;">Versi Free: Max 5 orang. Upgrade Pro 50rb/bln untuk unlimited.</p>
+    </div>
+  </div>
+</div>
+
+<!-- Pindah script ke bawah + pake defer biar pasti ke-load -->
+<script src="https://cdn.jsdelivr.net/npm/qrcode/build/qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+<script>
+// CEK KALO BUKA VIA file://
+if (window.location.protocol === 'file:') {
+  document.getElementById('fileWarn').classList.remove('hidden');
+  document.getElementById('btnBuatQR').disabled = true;
+}
+
+// ============ 1. STATE ============
+let currentLoc = null;
+let currentQRData = null;
+let db = { proyek: [], absen: [] };
+let scanRafId = null;
+
+// ============ 2. UTILS ============
+const toast = msg => {
+  const t = document.createElement('div');
+  t.className = 'toast'; t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 3000);
+};
+const save = () => {
+  try {
+    const dbToSave = JSON.parse(JSON.stringify(db));
+    dbToSave.absen.forEach(a => delete a.selfieBlob);
+    localStorage.setItem('hadirbos', JSON.stringify(dbToSave));
+  } catch (e) { console.error("Save error", e); toast('Gagal simpan data'); }
+};
+const load = () => {
+  try {
+    const s = localStorage.getItem('hadirbos');
+    if (s) db = {...db,...JSON.parse(s) };
+  } catch (e) {
+    console.error("Load error, reset DB", e);
+    localStorage.removeItem('hadirbos');
+  }
+};
+const getToday = () => new Date().toLocaleDateString('en-CA');
+const switchTab = name => {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.nav button').forEach(b => b.classList.remove('active'));
+  document.getElementById(name).classList.add('active');
+  document.getElementById('nav' + name.charAt(0).toUpperCase() + name.slice(1)).classList.add('active');
+  if (name === 'laporan') renderLaporan();
+};
+
+// ============ 3. BOS: BUAT QR ============
+async function buatQR() {
+  const nama = document.getElementById('namaProyek').value.trim();
+  if (!nama) return toast('Isi nama proyek dulu');
+  if (!navigator.geolocation) return toast('HP lu ga support GPS');
+
+  toast('Minta izin lokasi...');
+  try {
+    const perm = await navigator.permissions.query({ name: 'geolocation' });
+    if (perm.state === 'denied') return toast('GPS diblokir. Setelan Chrome → Lokasi → Izinkan');
+  } catch(e) {}
+
+  navigator.geolocation.getCurrentPosition(pos => {
+    currentLoc = { lat: pos.coords.latitude, lng: pos.coords.longitude, acc: pos.coords.accuracy };
+    if (currentLoc.acc > 50) return toast('GPS kurang akurat. Keluar ruangan coba');
+
+    const data = { v: 1, nama, lat: currentLoc.lat, lng: currentLoc.lng, t: Date.now() };
+    currentQRData = data;
+    db.proyek.push(data); save();
+
+    document.getElementById('qrWrap').innerHTML = '';
+    QRCode.toCanvas(document.createElement('canvas'), JSON.stringify(data), { width: 256 }, (err, canvas) => {
+      if (err) return toast('Gagal buat QR');
+      document.getElementById('qrWrap').appendChild(canvas);
+    });
+    document.getElementById('lokasiTxt').innerText = `Lat:${currentLoc.lat.toFixed(6)} Lng:${currentLoc.lng.toFixed(6)} ±${Math.round(currentLoc.acc)}m`;
+  }, err => {
+    if (err.code === 1) toast('Izin GPS ditolak. Setelan Chrome → Lokasi → Izinkan');
+    else if (err.code === 2) toast('GPS ga dapet sinyal. Nyalain GPS + keluar ruangan');
+    else if (err.code === 3) toast('GPS timeout. Coba lagi');
+    else toast('Gagal ambil GPS: ' + err.message);
+  }, { enableHighAccuracy: true, timeout: 10000 });
+}
+
+// ============ 4. KULI: SCAN + SELFIE ============
+async function startScan() {
+  const video = document.getElementById('video');
+  video.classList.remove('hidden');
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+    video.srcObject = stream;
+    await video.play();
+    scanFrame(video);
+  } catch (e) { toast('Kamera error: ' + e.message); }
+}
+
+function scanFrame(video) {
+  if (video.readyState!== video.HAVE_ENOUGH_DATA) {
+    scanRafId = requestAnimationFrame(() => scanFrame(video));
+    return;
+  }
+  const canvas = document.getElementById('canvas');
+  canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  const code = jsQR(ctx.getImageData(0, 0, canvas.width, canvas.height).data, canvas.width, canvas.height);
+  if (code) {
+    video.srcObject.getTracks().forEach(t => t.stop());
+    video.classList.add('hidden');
+    cancelAnimationFrame(scanRafId);
+    try {
+      currentQRData = JSON.parse(code.data);
+      if (!currentQRData.lat) throw 'QR Invalid';
+      document.getElementById('btnSelfie').classList.remove('hidden');
+      document.getElementById('statusKuli').innerText = 'QR OK: ' + currentQRData.nama;
+    } catch (e) { toast('QR Proyek tidak valid'); }
+    return;
+  }
+  scanRafId = requestAnimationFrame(() => scanFrame(video));
+}
+
+async function ambilSelfie() {
+  const nama = document.getElementById('namaKuli').value.trim();
+  if (!nama) return toast('Isi nama lu dulu');
+  if (!currentQRData ||!currentQRData.lat) return toast('Scan QR dulu');
+
+  navigator.geolocation.getCurrentPosition(async pos => {
+    if (pos.coords.accuracy > 100) return toast('GPS ngaco. Matin Fake GPS');
+    const jarak = getDistance(pos.coords.latitude, pos.coords.longitude, currentQRData.lat, currentQRData.lng);
+    if (jarak > 150) return toast(`Lu kejauhan ${Math.round(jarak)}m dari proyek. Maks 150m`);
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" } });
+      const video = document.getElementById('video');
+      video.srcObject = stream; video.classList.remove('hidden');
+      await video.play();
+      await new Promise(r => video.onloadeddata = r);
+      const canvas = document.getElementById('canvas');
+      canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+      canvas.getContext('2d').drawImage(video, 0, 0);
+      const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.5));
+      const selfieBlob = URL.createObjectURL(blob);
+      stream.getTracks().forEach(t => t.stop());
+      video.classList.add('hidden');
+
+      const dataAbsen = {
+        nama, proyek: currentQRData.nama, waktu: new Date().toLocaleString('id-ID'),
+        lat: pos.coords.latitude, lng: pos.coords.longitude, acc: pos.coords.accuracy,
+        selfieBlob, tgl: getToday()
+      };
+      const hariIni = db.absen.filter(a => a.tgl === getToday());
+      if (hariIni.length >= 5) return toast('Versi Free max 5 orang/hari. Upgrade Pro 50rb/bln');
+      db.absen.push(dataAbsen); save();
+      document.getElementById('statusKuli').innerText = 'ABSEN BERHASIL ✅';
+      document.getElementById('btnSelfie').classList.add('hidden');
+    } catch (e) { toast('Gagal ambil selfie: ' + e.message); }
+  }, err => {
+    if (err.code === 1) toast('Izin GPS ditolak. Setelan Chrome → Lokasi → Izinkan');
+    else if (err.code === 2) toast('GPS ga dapet sinyal. Nyalain GPS + keluar ruangan');
+    else toast('GPS Error: ' + err.message);
+  }, { enableHighAccuracy: true, timeout: 10000 });
+}
+
+function getDistance(lat1, lon1, lat2, lon2) {
+  const R = 6371e3; const φ1 = lat1 * Math.PI/180; const φ2 = lat2 * Math.PI/180;
+  const Δφ = (lat2-lat1) * Math.PI/180; const Δλ = (lon2-lon1) * Math.PI/180;
+  const a = Math.sin(Δφ/2) * Math.sin(Δφ/2) + Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ/2) * Math.sin(Δλ/2);
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
+// ============ 5. LAPORAN ============
+function renderLaporan() {
+  const list = db.absen.filter(a => a.tgl === getToday());
+  if (list.length === 0) return document.getElementById('listAbsen').innerText = 'Belum ada data';
+  document.getElementById('listAbsen').innerHTML = list.map((a, i) =>
+    `<div style="text-align:left; border-bottom:1px solid #eee; padding:8px 0;">
+      <b>${i+1}. ${a.nama}</b><br><small>${a.waktu} | ±${Math.round(a.acc)}m</small>
+    </div>`
+  ).join('');
+}
+
+function exportCSV() {
+  const list = db.absen.filter(a => a.tgl === getToday());
+  if (list.length === 0) return toast('Ga ada data');
+  let csv = 'Nama,Proyek,Waktu,Latitude,Longitude,Akurasi\n';
+  list.forEach(a => { csv += `"${a.nama}","${a.proyek}","${a.waktu}",${a.lat},${a.lng},${a.acc}\n`; });
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = `Absen-${getToday()}.csv`; a.click();
+  URL.revokeObjectURL(url);
+}
+
+// ============ 6. INIT ============
+// Pake addEventListener biar ga error kalo function ga kebaca
+document.getElementById('navBos').onclick = () => switchTab('bos');
+document.getElementById('navKuli').onclick = () => switchTab('kuli');
+document.getElementById('navLaporan').onclick = () => switchTab('laporan');
+document.getElementById('btnBuatQR').onclick = buatQR;
+document.getElementById('btnStartScan').onclick = startScan;
+document.getElementById('btnSelfie').onclick = ambilSelfie;
+document.getElementById('btnExport').onclick = exportCSV;
+
+load();
+renderLaporan();
+</script>
+</body>
+</html>
