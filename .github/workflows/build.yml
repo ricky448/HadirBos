@@ -45,3 +45,4 @@ jobs:
         with:
           name: HadirBos-debug
           path: android/app/build/outputs/apk/debug/app-debug.apk
+          
